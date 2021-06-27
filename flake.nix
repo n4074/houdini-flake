@@ -3,7 +3,6 @@
 
   outputs = { self, nixpkgs }:
     let pkgs = nixpkgs.legacyPackages.x86_64-linux;
-        license_dir = "~/.config/houdini";
         deps = pkgs: with pkgs; [
             bc
             less
@@ -34,35 +33,41 @@
             libpng
             libjpeg
             udev
+            gcc6
             dbus
             # remove
             linuxPackages.nvidia_x11
-            gdb
         ];
-        ld_library_path = with pkgs; builtins.concatStringsSep ":" [
-          "${stdenv.cc.cc.lib}/lib64"
-          (lib.makeLibraryPath (deps pkgs))
+
+        ld_library_path = builtins.concatStringsSep ":" [
+          "${pkgs.stdenv.cc.cc.lib}/lib64"
+          (pkgs.lib.makeLibraryPath (deps pkgs))
         ];
     in {
+
       packages.x86_64-linux.houdini-fhs = (
-        pkgs.buildFHSUserEnv {
+        pkgs.buildFHSUserEnvBubblewrap {
           name = "houdini";
           targetPkgs = deps;
 
-          extraBuildCommands = ''
-            mkdir -p $out/usr/lib/sesi
+          runScript = ''
+            ${pkgs.undaemonize}/bin/undaemonize ${self.packages.x86_64-linux.houdini-unwrapped}/bin/houdini;
           '';
-
-          #runScript = "${pkgs.undaemonize}/bin/undaemonize ${self.packages.x86_64-linux.houdini}/bin/houdini";
-
         }
 
       );
 
-      packages.x86_64-linux.houdini = (with pkgs;
+      packages.x86_64-linux.houdini = pkgs.writeScriptBin "houdini" ''
+        #!${pkgs.stdenv.shell}
+        ${self.packages.x86_64-linux.houdini-unwrapped}/houdini/sbin/sesinetd -c -D &
+        ${self.packages.x86_64-linux.houdini-fhs}/bin/houdini
+      '';
+
+      packages.x86_64-linux.houdini-unwrapped = (with pkgs;
         stdenv.mkDerivation rec {
           version = "18.5.596";
           pname = "houdini";
+
           src = requireFile rec {
             name = "houdini-${version}-linux_x86_64_gcc6.3.tar.gz";
             sha256 = "0kppc9kn5kj3zi5r0bgj3zr92bhba2zailspzqcan4mfj2yzcspa";
@@ -76,11 +81,15 @@
             '';
           };
 
-          buildInputs = [ bc ];
+          nativeBuildInputs = [
+            autoPatchelfHook
+          ];
+
+          buildInputs = [ bc makeWrapper pkgs.stdenv.cc.cc.lib ];
           installPhase = ''
+            export dontAutoPatchelf=1
             patchShebangs houdini.install
             mkdir -p $out
-            sed -i "s|/usr/lib/sesi|${license_dir}|g" houdini.install
             ./houdini.install --install-houdini \
                               --no-install-menus \
                               --no-install-bin-symlink \
@@ -88,20 +97,26 @@
                               --no-root-check \
                               --accept-EULA 2020-05-05 \
                               $out
-            sed -i "s|/usr/lib/sesi|${license_dir}|g" $out/houdini/sbin/sesinetd_safe
-            sed -i "s|/usr/lib/sesi|${license_dir}|g" $out/houdini/sbin/sesinetd.startup
-            echo "export LD_LIBRARY_PATH=${ld_library_path}" >> $out/bin/app_init.sh
-            echo "export LD_LIBRARY_PATH=${ld_library_path}" >> $out/houdini/sbin/app_init.sh
+            #echo "export LD_LIBRARY_PATH=${ld_library_path}" >> $out/bin/app_init.sh
+            #echo "export LD_LIBRARY_PATH=${ld_library_path}" >> $out/houdini/sbin/app_init.sh
           '';
+
+          preFixup = ''
+            makeWrapper $out/houdini/sbin/sesinetd $out/bin/sesinetd
+          '';
+
           postFixup = ''
             INTERPRETER="$(cat "$NIX_CC"/nix-support/dynamic-linker)"
             for BIN in $(find $out/bin $out/houdini/sbin -type f -executable); do
               if patchelf $BIN 2>/dev/null ; then
                 echo "Patching ELF $BIN"
-                patchelf --set-interpreter "$INTERPRETER" "$BIN" || true
+                patchelf --set-interpreter "$INTERPRETER" "$BIN"
               fi
             done
+
+            autoPatchelf "$out/houdini/sbin/sesinetd"
           '';
+
           meta = {
             description = "3D animation application software";
             homepage = "https://www.sidefx.com";
